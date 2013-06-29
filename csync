@@ -1,0 +1,263 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import subprocess
+import json
+import hashlib
+from logging import error
+
+tmp_dir = "/tmp/.csync"
+
+def s3_download(remote, local):
+    proc = subprocess.Popen(['s3cmd', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
+
+def manta_download(remote, local):
+    proc = subprocess.Popen(['mget', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
+
+def s3_upload(local, remote):
+    proc = subprocess.Popen(['s3cmd', 'put', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
+
+def manta_upload(local, remote):
+    proc = subprocess.Popen(['mput', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
+
+# Calculates the MD5 of a file
+def md5(path):
+    m = hashlib.md5()
+
+    with open(path,'rb') as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk: break
+            m.update(chunk)
+
+    return m.hexdigest()
+
+def list(directory):
+    result = []
+    for (path, dirs, files) in os.walk(directory):
+        for filename in files:
+            result.append(path + '/' + filename)
+    return result
+
+def download_metadata(bucket, directory):
+    remote = bucket + '/.csync'
+    local = tmp_dir + '/' + directory + '.csync'
+
+    output, errors = s3_download(remote, local)
+    if "404 (Not Found)" in errors:
+        # No metadata found for the directory to be backed up
+        metadata = {}
+    else:
+        f = open(local)
+        metadata = json.loads(f.read())
+        f.close()
+
+    return metadata
+
+def upload_metadata(bucket, directory, metadata):
+    remote = bucket + '/.csync'
+    local = tmp_dir + '/' + directory + '.csync'
+
+    # Save updated metadata file to disk
+    output = json.dumps(metadata)
+    f = open(local, "w")
+    f.write(output)
+    f.close()
+
+    output, errors = s3_upload(local, remote)
+
+    if errors != "":
+        raise RuntimeError("Failed to update metadata")
+
+def download_file(bucket, directory, path, entry):
+    if len(entry['files']) == 1:
+        file_entry = entry['files'][0]
+        remote = bucket + '/' + file_entry['path']
+        local = directory + '/' + path
+
+        output, errors = s3_download(remote, local)
+        if errors != "":
+            raise RuntimeError("Failed to download file")
+
+        return
+
+    cat_cmd = ['cat']
+    for file_entry in entry['files']:
+        remote = bucket + '/' + file_entry['path']
+        local = tmp_dir + '/' + os.path.basename(file_entry['path'])
+
+        output, errors = s3_download(remote, local)
+        if errors != "":
+            raise RuntimeError("Failed to download file")
+
+        cat_cmd.append(local)
+
+    local = open(directory + '/' + path, 'w')
+    proc = subprocess.Popen(cat_cmd, stdout=local, stderr=subprocess.PIPE)
+    output, errors = proc.communicate()
+    if errors != "":
+        print errors
+        raise RuntimeError("Failed to concatenate files")
+
+    local.close()
+
+def upload_file(bucket, directory, path):
+    statinfo = os.stat(path)
+
+    pending_files = []
+
+    # Anything larger than 100MB will be split up into chunks
+    #if statinfo.st_size >= 104857600:
+    if statinfo.st_size >= 5242880:
+        dirname = os.path.dirname(path)
+        filename = os.path.basename(path)
+        proc = subprocess.Popen(['split', '-b5m', path, tmp_dir + '/' + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = proc.communicate()
+        if errors != "":
+            raise RuntimeError("Failed to split file")
+
+        for (split_path, dirs, files) in os.walk(tmp_dir):
+            for file in files:
+                if file.startswith(filename + '-'):
+                    md5hash = md5(tmp_dir + '/' + file)
+                    pending_files.append({
+                        "path": dirname[len(directory)+1:] + '/' + file,
+                        "orig_md5": md5hash,
+                        "tmp_path": tmp_dir + '/' + file
+                    })
+    else:
+        pending_files.append({
+            "path": path[len(directory)+1:],
+            "orig_md5": md5(path),
+            "tmp_path": path
+        })
+
+    for file_entry in pending_files:
+        tmp_path = file_entry['tmp_path']
+        file_path = file_entry['path']
+        if file_path.startswith('/'):
+            remote = bucket + file_path
+        else:
+            remote = bucket + '/' + file_path
+
+        output, errors = s3_upload(tmp_path, remote)
+
+        if errors != "":
+            raise RuntimeError("Failed to upload file")
+
+        file_entry.pop('tmp_path')
+
+    return pending_files
+
+def backup(bucket, rel_dir):
+    print 'Performing backup'
+
+    directory = os.path.abspath(rel_dir)
+    basename = os.path.basename(directory)
+
+    # Obtain metadata containing sync state from S3
+    metadata = download_metadata(bucket, basename)
+
+    # Go through each file in directory to find what changed
+    pending = []
+    files = list(directory)
+    for path in files:
+        key = path[len(directory)+1:]
+        if key in metadata:
+            # file is in metadata, so check to see if it has changed
+            md5hash = md5(path)
+            if metadata[key]["orig_md5"] != md5hash:
+                pending.append({"path": path, "orig_md5": md5hash})
+            else:
+                # TODO: even if hash matches, check the actual file to make sure data really is there
+                pass
+        else:
+            # file is not in metadata, so that means file is not in remote
+            pending.append({"path": path, "orig_md5": md5(path)})
+
+    # Go through each pending file, encrypt and upload them to S3, then update metadata
+    count = 0
+    total = len(pending)
+    for change in pending:
+        count += 1
+        path = change['path']
+        orig_md5 = change['orig_md5']
+
+        encrypted_files = upload_file(bucket, directory, path)
+
+        metadata[path[len(directory)+1:]] = {"orig_md5": orig_md5, "files": encrypted_files}
+        upload_metadata(bucket, basename, metadata)
+
+        print count, "of", total
+
+    print 'Done!'
+
+def restore(bucket, rel_dir):
+    print 'Performing restore'
+
+    directory = os.path.abspath(rel_dir)
+    basename = os.path.basename(directory)
+
+    # Obtain metadata containing sync state from S3
+    metadata = download_metadata(bucket, basename)
+
+    count = 0
+    total = len(metadata.keys())
+    for file in metadata:
+        count += 1
+        path = directory + '/' + file
+        if os.path.exists(path):
+            md5hash = md5(path)
+            if md5hash != metadata[file]['orig_md5']:
+                download_file(bucket, directory, file, metadata[file])
+        else:
+            download_file(bucket, directory, file, metadata[file])
+
+        print count, "of", total
+
+    print 'Done!'
+
+def main():
+    if len(sys.argv) < 4:
+        print "Usage: csync backup s3://bucket-name/path directory"
+        print "       csync restore s3://bucket-name/path directory"
+        return
+
+    ret = subprocess.call("mkdir -p " + tmp_dir, shell = True)
+    if ret != 0:
+        raise RuntimeError("Couldn't create temporary directory")
+
+    cmd = sys.argv[1]
+    bucket = sys.argv[2]
+    directory = sys.argv[3]
+    if cmd == 'backup':
+        backup(bucket, directory)
+    elif cmd == 'restore':
+        restore(bucket, directory)
+    else:
+        raise ValueError("Expecting backup or restore")
+
+    ret = subprocess.call("rm -rf " + tmp_dir, shell = True)
+    if ret != 0:
+        raise RuntimeError("Couldn't remove temporary directory")
+
+if __name__ == '__main__':
+    try:
+        main()
+        sys.exit(0)
+
+    except SystemExit, e:
+        sys.exit(e.code)
+
+    except KeyboardInterrupt:
+        sys.stderr.write("See ya!\n")
+        sys.exit(1)
+
+    except Exception, e:
+        error(u"Unknown problem: %s" % e)
+        sys.exit(1)
