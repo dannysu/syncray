@@ -64,7 +64,7 @@ def manta_md5(remote):
     return m.group(1)
 
 def encrypt(decrypted, encrypted, passphrase):
-    gpg_encrypt = 'gpg -c --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
+    gpg_encrypt = 'gpg -c --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
     gpg_encrypt += encrypted
     gpg_encrypt += ' ' + decrypted
     command = gpg_encrypt.split(" ")
@@ -74,7 +74,7 @@ def encrypt(decrypted, encrypted, passphrase):
         raise RuntimeError("Failed to encrypt " + decrypted)
 
 def decrypt(encrypted, decrypted, passphrase):
-    gpg_decrypt = 'gpg -d --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
+    gpg_decrypt = 'gpg -d --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
     gpg_decrypt += decrypted
     gpg_decrypt += ' ' + encrypted
     command = gpg_decrypt.split(" ")
