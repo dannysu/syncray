@@ -41,8 +41,9 @@ def manta_download(remote, local):
 def manta_upload(local, remote):
     dirname = os.path.dirname(remote)
 
-    ret = subprocess.call("mmkdir -p " + dirname)
-    if ret != 0:
+    proc = subprocess.Popen(['mmkdir', '-p', dirname], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, errors = proc.communicate()
+    if proc.returncode != 0:
         raise RuntimeError("Failed to mmkdir -p " + dirname)
 
     proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
