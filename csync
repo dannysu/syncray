@@ -8,6 +8,7 @@ import json
 import hashlib
 import argparse
 import re
+import getpass
 from logging import error
 
 prog = 'csync'
@@ -386,8 +387,8 @@ def main():
             help="""verify remote files' md5 against metadata and resync if
                  there is a mismatch""")
 
-    parser.add_argument('-p', nargs=1, metavar='passphrase', dest='passphrase',
-            required=True, help='passphrase for encryption')
+    parser.add_argument('-p', nargs='?', metavar='passphrase', dest='passphrase',
+            help="set passphrase for encryption so you don't have to type it in")
 
     parser.add_argument('action', nargs=1,
             choices=['backup', 'restore'],
@@ -407,8 +408,11 @@ def main():
     local = args.local[0]
     service = args.service[0]
     mode = args.mode[0]
-    passphrase = args.passphrase[0]
+    passphrase = args.passphrase
     verbose = args.verbose
+
+    if passphrase == None:
+        passphrase = getpass.getpass("Enter passphrase to encrypt your data with: ")
 
     try:
         os.mkdir(tmp_dir)
