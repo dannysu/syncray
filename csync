@@ -446,7 +446,6 @@ if __name__ == '__main__':
         sys.exit(e.code)
 
     except KeyboardInterrupt:
-        sys.stderr.write("\nSee ya!\n")
         sys.exit(1)
 
     except Exception, e:
