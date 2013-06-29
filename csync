@@ -5,25 +5,55 @@ import sys
 import subprocess
 import json
 import hashlib
+import argparse
 from logging import error
 
+prog = 'csync'
 tmp_dir = "/tmp/.csync"
 
 def s3_download(remote, local):
     proc = subprocess.Popen(['s3cmd', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
-def manta_download(remote, local):
-    proc = subprocess.Popen(['mget', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return proc.communicate()
-
 def s3_upload(local, remote):
     proc = subprocess.Popen(['s3cmd', 'put', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
-def manta_upload(local, remote):
-    proc = subprocess.Popen(['mput', 'get', '--force', remote, local], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def s3_encrypt(path):
+    return path
+
+def s3_decrypt(path):
+    return path
+
+def manta_download(remote, local):
+    proc = subprocess.Popen(['mget', '-o', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
+
+def manta_upload(local, remote):
+    dirname = os.path.dirname(remote)
+
+    ret = subprocess.call("mmkdir -p " + dirname)
+    if ret != 0:
+        raise RuntimeError("Failed to mmkdir -p " + dirname)
+
+    proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
+
+#gpg_command = /usr/bin/gpg
+#gpg_decrypt = %(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s
+#gpg_encrypt = %(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s
+
+def manta_encrypt(path):
+    gpg_decrypt = """%(gpg_command)s -d --verbose --no-use-agent --batch --yes
+                  --passphrase-fd %(passphrase_fd)s -o %(output_file)s
+                  %(input_file)s"""
+    ret = subprocess.call("mmkdir -p " + dirname)
+    if ret != 0:
+        raise RuntimeError("Failed to mmkdir -p " + dirname)
+    return path
+
+def manta_decrypt(path):
+    return path
 
 # Calculates the MD5 of a file
 def md5(path):
@@ -44,12 +74,13 @@ def list(directory):
             result.append(path + '/' + filename)
     return result
 
-def download_metadata(bucket, directory):
+def download_metadata(bucket, directory, download):
     remote = bucket + '/.csync'
     local = tmp_dir + '/' + directory + '.csync'
 
-    output, errors = s3_download(remote, local)
-    if "404 (Not Found)" in errors:
+    output, errors = download(remote, local)
+
+    if "404 (Not Found)" in errors or "ResourceNotFoundError" in errors:
         # No metadata found for the directory to be backed up
         metadata = {}
     else:
@@ -59,7 +90,7 @@ def download_metadata(bucket, directory):
 
     return metadata
 
-def upload_metadata(bucket, directory, metadata):
+def upload_metadata(bucket, directory, metadata, upload):
     remote = bucket + '/.csync'
     local = tmp_dir + '/' + directory + '.csync'
 
@@ -69,20 +100,20 @@ def upload_metadata(bucket, directory, metadata):
     f.write(output)
     f.close()
 
-    output, errors = s3_upload(local, remote)
+    output, errors = upload(local, remote)
 
     if errors != "":
         raise RuntimeError("Failed to update metadata")
 
-def download_file(bucket, directory, path, entry):
+def download_file(bucket, directory, path, entry, download):
     if len(entry['files']) == 1:
         file_entry = entry['files'][0]
         remote = bucket + '/' + file_entry['path']
         local = directory + '/' + path
 
-        output, errors = s3_download(remote, local)
+        output, errors = download(remote, local)
         if errors != "":
-            raise RuntimeError("Failed to download file")
+            raise RuntimeError("Failed to download file " + local)
 
         return
 
@@ -91,9 +122,9 @@ def download_file(bucket, directory, path, entry):
         remote = bucket + '/' + file_entry['path']
         local = tmp_dir + '/' + os.path.basename(file_entry['path'])
 
-        output, errors = s3_download(remote, local)
+        output, errors = download(remote, local)
         if errors != "":
-            raise RuntimeError("Failed to download file")
+            raise RuntimeError("Failed to download file " + local)
 
         cat_cmd.append(local)
 
@@ -101,25 +132,24 @@ def download_file(bucket, directory, path, entry):
     proc = subprocess.Popen(cat_cmd, stdout=local, stderr=subprocess.PIPE)
     output, errors = proc.communicate()
     if errors != "":
-        print errors
-        raise RuntimeError("Failed to concatenate files")
+        raise RuntimeError("Failed to concatenate files for " + directory + '/' + path)
 
     local.close()
 
-def upload_file(bucket, directory, path):
+def upload_file(bucket, directory, path, upload):
     statinfo = os.stat(path)
 
     pending_files = []
 
     # Anything larger than 100MB will be split up into chunks
-    #if statinfo.st_size >= 104857600:
-    if statinfo.st_size >= 5242880:
+    chunk_size = 5
+    if statinfo.st_size >= chunk_size * 1024 * 1024:
         dirname = os.path.dirname(path)
         filename = os.path.basename(path)
-        proc = subprocess.Popen(['split', '-b5m', path, tmp_dir + '/' + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['split', '-b' + chunk_size + 'm', path, tmp_dir + '/' + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if errors != "":
-            raise RuntimeError("Failed to split file")
+            raise RuntimeError("Failed to split file " + path)
 
         for (split_path, dirs, files) in os.walk(tmp_dir):
             for file in files:
@@ -145,23 +175,23 @@ def upload_file(bucket, directory, path):
         else:
             remote = bucket + '/' + file_path
 
-        output, errors = s3_upload(tmp_path, remote)
+        output, errors = upload(tmp_path, remote)
 
         if errors != "":
-            raise RuntimeError("Failed to upload file")
+            raise RuntimeError("Failed to upload file " + tmp_path)
 
         file_entry.pop('tmp_path')
 
     return pending_files
 
-def backup(bucket, rel_dir):
-    print 'Performing backup'
-
+def backup(bucket, rel_dir, download, upload):
     directory = os.path.abspath(rel_dir)
     basename = os.path.basename(directory)
 
+    print 'Backing up ' + directory + ' to ' + bucket
+
     # Obtain metadata containing sync state from S3
-    metadata = download_metadata(bucket, basename)
+    metadata = download_metadata(bucket, basename, download)
 
     # Go through each file in directory to find what changed
     pending = []
@@ -185,62 +215,107 @@ def backup(bucket, rel_dir):
     total = len(pending)
     for change in pending:
         count += 1
+        sys.stdout.write(str(count) + " of " + str(total))
+        sys.stdout.flush()
+
         path = change['path']
         orig_md5 = change['orig_md5']
 
-        encrypted_files = upload_file(bucket, directory, path)
+        encrypted_files = upload_file(bucket, directory, path, upload)
 
         metadata[path[len(directory)+1:]] = {"orig_md5": orig_md5, "files": encrypted_files}
-        upload_metadata(bucket, basename, metadata)
+        upload_metadata(bucket, basename, metadata, upload)
 
-        print count, "of", total
+        sys.stdout.write(" " + unichr(10003) + "\n")
 
     print 'Done!'
 
-def restore(bucket, rel_dir):
-    print 'Performing restore'
-
+def restore(bucket, rel_dir, download):
     directory = os.path.abspath(rel_dir)
     basename = os.path.basename(directory)
 
+    print 'Restoring ' + bucket + ' to ' + directory
+
     # Obtain metadata containing sync state from S3
-    metadata = download_metadata(bucket, basename)
+    metadata = download_metadata(bucket, basename, download)
 
     count = 0
     total = len(metadata.keys())
     for file in metadata:
         count += 1
+        sys.stdout.write(str(count) + " of " + str(total))
+        sys.stdout.flush()
+
         path = directory + '/' + file
         if os.path.exists(path):
             md5hash = md5(path)
             if md5hash != metadata[file]['orig_md5']:
-                download_file(bucket, directory, file, metadata[file])
+                download_file(bucket, directory, file, metadata[file], download)
         else:
-            download_file(bucket, directory, file, metadata[file])
+            download_file(bucket, directory, file, metadata[file], download)
 
-        print count, "of", total
+        sys.stdout.write(" " + unichr(10003) + "\n")
 
     print 'Done!'
 
 def main():
-    if len(sys.argv) < 4:
-        print "Usage: csync backup s3://bucket-name/path directory"
-        print "       csync restore s3://bucket-name/path directory"
-        return
+    description = prog + """ is a tool for synchronizing folders and encrypt
+                         them to cloud storage encrypted such as Amazon S3 and
+                         Joyent Manta."""
+    parser = argparse.ArgumentParser(description = description,
+            prog = prog)
+
+    parser.add_argument('-s', nargs='?', default='s3',
+            metavar='service',
+            choices=['s3', 'manta'],
+            dest='service',
+            help='cloud storage to use {%(choices)s} (default: %(default)s)')
+
+    parser.add_argument('-m', nargs='?', default='contribute',
+            metavar='mode',
+            choices=['contribute', 'echo'],
+            dest='mode',
+            help="""sync mode to use {%(choices)s}. 'contribute' copies only
+                 from local to remote, no deletes. 'echo' replicates changed
+                 files and deletes to remote. (default: %(default)s)""")
+
+    parser.add_argument('action', nargs=1, choices=['backup', 'restore'],
+            help='backup data or restore data')
+
+    remote_help = """s3 bucket (s3://bucket-name/folder) or Manta path
+                  (/$MANTA_USER/stor/folder)"""
+    parser.add_argument('remote', nargs=1, help=remote_help)
+
+    parser.add_argument('local', nargs=1,
+            help="directory on local computer")
+
+    args = parser.parse_args()
 
     ret = subprocess.call("mkdir -p " + tmp_dir, shell = True)
     if ret != 0:
         raise RuntimeError("Couldn't create temporary directory")
 
-    cmd = sys.argv[1]
-    bucket = sys.argv[2]
-    directory = sys.argv[3]
-    if cmd == 'backup':
-        backup(bucket, directory)
-    elif cmd == 'restore':
-        restore(bucket, directory)
+    action = args.action[0]
+    remote = args.remote[0]
+    local = args.loca[0]
+    service = args.service[0]
+    mode = args.mode[0]
+
+    if service == 's3':
+        download = s3_download
+        upload = s3_upload
+        encrypt = s3_encrypt
+        decrypt = s3_decrypt
     else:
-        raise ValueError("Expecting backup or restore")
+        download = manta_download
+        upload = manta_upload
+        encrypt = manta_encrypt
+        decrypt= manta_decrypt
+
+    if action == 'backup':
+        backup(remote, local, mode, download, upload, encrypt)
+    else:
+        restore(remote, local, download, decrypt)
 
     ret = subprocess.call("rm -rf " + tmp_dir, shell = True)
     if ret != 0:
