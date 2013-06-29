@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
 import os
+import shutil
 import sys
 import subprocess
 import json
 import hashlib
 import argparse
+import re
 from logging import error
 
 prog = 'csync'
@@ -19,11 +21,18 @@ def s3_upload(local, remote):
     proc = subprocess.Popen(['s3cmd', 'put', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
-def s3_encrypt(path):
-    return path
+def s3_delete(remote):
+    proc = subprocess.Popen(['s3cmd', 'del', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
 
-def s3_decrypt(path):
-    return path
+def s3_md5(remote):
+    proc = subprocess.Popen(['s3cmd', 'info', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, errors = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError("Failed to get info for " + remote)
+    
+    m = re.search('MD5 sum: *([a-z0-9]*)', output)
+    return m.group(1)
 
 def manta_download(remote, local):
     proc = subprocess.Popen(['mget', '-o', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -39,21 +48,38 @@ def manta_upload(local, remote):
     proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
-#gpg_command = /usr/bin/gpg
-#gpg_decrypt = %(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s
-#gpg_encrypt = %(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s
+def manta_delete(remote):
+    proc = subprocess.Popen(['mrm', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.communicate()
 
-def manta_encrypt(path):
-    gpg_decrypt = """%(gpg_command)s -d --verbose --no-use-agent --batch --yes
-                  --passphrase-fd %(passphrase_fd)s -o %(output_file)s
-                  %(input_file)s"""
-    ret = subprocess.call("mmkdir -p " + dirname)
-    if ret != 0:
-        raise RuntimeError("Failed to mmkdir -p " + dirname)
-    return path
+def manta_md5(remote):
+    proc = subprocess.Popen(['mmd5', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, errors = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError("Failed to get info for " + remote)
+    
+    m = re.search('^([a-z0-9]*) ', output)
+    return m.group(1)
 
-def manta_decrypt(path):
-    return path
+def encrypt(decrypted, encrypted, passphrase):
+    gpg_encrypt = 'gpg -c --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
+    gpg_encrypt += encrypted
+    gpg_encrypt += ' ' + decrypted
+    command = gpg_encrypt.split(" ")
+    proc = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+    output, errors = proc.communicate(passphrase + "\n")
+    if proc.returncode != 0:
+        raise RuntimeError("Failed to encrypt " + decrypted)
+
+def decrypt(encrypted, decrypted, passphrase):
+    gpg_decrypt = 'gpg -d --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
+    gpg_decrypt += decrypted
+    gpg_decrypt += ' ' + encrypted
+    command = gpg_decrypt.split(" ")
+    proc = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+    output, errors = proc.communicate(passphrase + "\n")
+    if proc.returncode != 0:
+        raise RuntimeError("Failed to decrypt " + encrypted)
 
 # Calculates the MD5 of a file
 def md5(path):
@@ -67,6 +93,14 @@ def md5(path):
 
     return m.hexdigest()
 
+def move(src, dst):
+    dirname = os.path.dirname(dst)
+    try:
+        os.makedirs(dirname)
+    except OSError:
+        pass
+    shutil.move(src, dst)
+
 def list(directory):
     result = []
     for (path, dirs, files) in os.walk(directory):
@@ -74,24 +108,32 @@ def list(directory):
             result.append(path + '/' + filename)
     return result
 
-def download_metadata(bucket, directory, download):
+def download_metadata(bucket, directory, download, passphrase):
     remote = bucket + '/.csync'
+    tmp_encrypt = tmp_dir + '/' + directory + '.csync.encrypt'
+    tmp_decrypt = tmp_dir + '/' + directory + '.csync.decrypt'
     local = tmp_dir + '/' + directory + '.csync'
 
-    output, errors = download(remote, local)
+    output, errors = download(remote, tmp_encrypt)
 
     if "404 (Not Found)" in errors or "ResourceNotFoundError" in errors:
         # No metadata found for the directory to be backed up
         metadata = {}
     else:
+        decrypt(tmp_encrypt, tmp_decrypt, passphrase)
+        move(tmp_decrypt, local)
+
         f = open(local)
         metadata = json.loads(f.read())
         f.close()
 
+    os.remove(tmp_encrypt)
+
     return metadata
 
-def upload_metadata(bucket, directory, metadata, upload):
+def upload_metadata(bucket, directory, metadata, upload, passphrase):
     remote = bucket + '/.csync'
+    tmp_encrypt = tmp_dir + '/' + directory + '.csync.encrypt'
     local = tmp_dir + '/' + directory + '.csync'
 
     # Save updated metadata file to disk
@@ -100,33 +142,51 @@ def upload_metadata(bucket, directory, metadata, upload):
     f.write(output)
     f.close()
 
-    output, errors = upload(local, remote)
+    # Encrypt it
+    encrypt(local, tmp_encrypt, passphrase)
 
+    output, errors = upload(tmp_encrypt, remote)
     if errors != "":
         raise RuntimeError("Failed to update metadata")
 
-def download_file(bucket, directory, path, entry, download):
+    os.remove(tmp_encrypt)
+
+def download_file(bucket, directory, path, entry, download, passphrase):
     if len(entry['files']) == 1:
         file_entry = entry['files'][0]
         remote = bucket + '/' + file_entry['path']
+        tmp_encrypt = tmp_dir + '/' + os.path.basename(path) + '.encrypt'
+        tmp_decrypt = tmp_dir + '/' + os.path.basename(path) + '.decrypt'
         local = directory + '/' + path
 
-        output, errors = download(remote, local)
+        output, errors = download(remote, tmp_encrypt)
         if errors != "":
             raise RuntimeError("Failed to download file " + local)
+
+        decrypt(tmp_encrypt, tmp_decrypt, passphrase)
+        move(tmp_decrypt, local)
+
+        os.remove(tmp_encrypt)
 
         return
 
     cat_cmd = ['cat']
     for file_entry in entry['files']:
         remote = bucket + '/' + file_entry['path']
+        tmp_encrypt = tmp_dir + '/' + os.path.basename(file_entry['path']) + '.encrypt'
+        tmp_decrypt = tmp_dir + '/' + os.path.basename(file_entry['path']) + '.decrypt'
         local = tmp_dir + '/' + os.path.basename(file_entry['path'])
 
-        output, errors = download(remote, local)
+        output, errors = download(remote, tmp_encrypt)
         if errors != "":
             raise RuntimeError("Failed to download file " + local)
+        
+        decrypt(tmp_encrypt, tmp_decrypt, passphrase)
+        move(tmp_decrypt, local)
 
         cat_cmd.append(local)
+
+        os.remove(tmp_encrypt)
 
     local = open(directory + '/' + path, 'w')
     proc = subprocess.Popen(cat_cmd, stdout=local, stderr=subprocess.PIPE)
@@ -136,12 +196,12 @@ def download_file(bucket, directory, path, entry, download):
 
     local.close()
 
-def upload_file(bucket, directory, path, upload):
+def upload_file(bucket, directory, path, upload, passphrase):
     statinfo = os.stat(path)
 
     pending_files = []
 
-    # Anything larger than 100MB will be split up into chunks
+    # Split large files into smaller chunks
     chunk_size = 5
     if statinfo.st_size >= chunk_size * 1024 * 1024:
         dirname = os.path.dirname(path)
@@ -169,31 +229,43 @@ def upload_file(bucket, directory, path, upload):
 
     for file_entry in pending_files:
         tmp_path = file_entry['tmp_path']
+        tmp_encrypt = file_entry['tmp_path'] + '.encrypt'
         file_path = file_entry['path']
+
+        encrypt(tmp_path, tmp_encrypt, passphrase)
+
         if file_path.startswith('/'):
             remote = bucket + file_path
         else:
             remote = bucket + '/' + file_path
 
-        output, errors = upload(tmp_path, remote)
-
+        output, errors = upload(tmp_encrypt, remote)
         if errors != "":
             raise RuntimeError("Failed to upload file " + tmp_path)
+
+        file_entry['encrypted_md5'] = md5(tmp_encrypt)
+
+        os.remove(tmp_encrypt)
 
         file_entry.pop('tmp_path')
 
     return pending_files
 
-def backup(bucket, rel_dir, download, upload):
+def backup(bucket, rel_dir, mode, verbose, passphrase, download, upload, delete, remote_md5):
     directory = os.path.abspath(rel_dir)
     basename = os.path.basename(directory)
 
-    print 'Backing up ' + directory + ' to ' + bucket
+    if verbose:
+        print 'Backing up ' + directory + ' to ' + bucket
 
     # Obtain metadata containing sync state from S3
-    metadata = download_metadata(bucket, basename, download)
+    if verbose:
+        print 'Download metadata'
+    metadata = download_metadata(bucket, basename, download, passphrase)
 
     # Go through each file in directory to find what changed
+    if verbose:
+        print 'Find changes'
     pending = []
     files = list(directory)
     for path in files:
@@ -204,59 +276,88 @@ def backup(bucket, rel_dir, download, upload):
             if metadata[key]["orig_md5"] != md5hash:
                 pending.append({"path": path, "orig_md5": md5hash})
             else:
-                # TODO: even if hash matches, check the actual file to make sure data really is there
-                pass
+                for part in metadata[key]['files']:
+                    expected_md5 = part['encrypted_md5']
+                    actual_md5 = remote_md5(bucket + '/' + part['path'])
+                    if expected_md5 != actual_md5:
+                        pending.append({"path": path, "orig_md5": md5hash})
+                        break
         else:
             # file is not in metadata, so that means file is not in remote
             pending.append({"path": path, "orig_md5": md5(path)})
 
     # Go through each pending file, encrypt and upload them to S3, then update metadata
+    if verbose:
+        print 'Upload changes'
     count = 0
     total = len(pending)
     for change in pending:
         count += 1
-        sys.stdout.write(str(count) + " of " + str(total))
-        sys.stdout.flush()
+        if verbose:
+            sys.stdout.write(str(count) + " of " + str(total))
+            sys.stdout.flush()
 
         path = change['path']
         orig_md5 = change['orig_md5']
 
-        encrypted_files = upload_file(bucket, directory, path, upload)
+        encrypted_files = upload_file(bucket, directory, path, upload, passphrase)
 
         metadata[path[len(directory)+1:]] = {"orig_md5": orig_md5, "files": encrypted_files}
-        upload_metadata(bucket, basename, metadata, upload)
+        upload_metadata(bucket, basename, metadata, upload, passphrase)
 
-        sys.stdout.write(" " + unichr(10003) + "\n")
+        if verbose:
+            sys.stdout.write(" " + unichr(10003) + "\n")
 
-    print 'Done!'
+    # If we're in Echo mode, then also delete on remote anything already gone on local
+    if mode == 'e':
+        remove = []
+        for key in metadata:
+            if not os.path.exists(directory + '/' + key):
+                remove.append(key)
 
-def restore(bucket, rel_dir, download):
+        for key in remove:
+            delete(bucket + '/' + key)
+            metadata.pop(key)
+            upload_metadata(bucket, basename, metadata, upload, passphrase)
+
+    if verbose:
+        print 'Done!'
+
+def restore(bucket, rel_dir, verbose, passphrase, download):
     directory = os.path.abspath(rel_dir)
     basename = os.path.basename(directory)
 
-    print 'Restoring ' + bucket + ' to ' + directory
+    if verbose:
+        print 'Restoring ' + bucket + ' to ' + directory
 
     # Obtain metadata containing sync state from S3
-    metadata = download_metadata(bucket, basename, download)
+    if verbose:
+        print 'Download metadata'
+    metadata = download_metadata(bucket, basename, download, passphrase)
 
+    if verbose:
+        print 'Download files'
     count = 0
     total = len(metadata.keys())
     for file in metadata:
         count += 1
-        sys.stdout.write(str(count) + " of " + str(total))
-        sys.stdout.flush()
+        if verbose:
+            sys.stdout.write(str(count) + " of " + str(total))
+            sys.stdout.flush()
 
         path = directory + '/' + file
         if os.path.exists(path):
             md5hash = md5(path)
             if md5hash != metadata[file]['orig_md5']:
-                download_file(bucket, directory, file, metadata[file], download)
+                download_file(bucket, directory, file, metadata[file], download, passphrase)
         else:
-            download_file(bucket, directory, file, metadata[file], download)
+            download_file(bucket, directory, file, metadata[file], download, passphrase)
 
-        sys.stdout.write(" " + unichr(10003) + "\n")
+        if verbose:
+            sys.stdout.write(" " + unichr(10003) + "\n")
 
-    print 'Done!'
+    if verbose:
+        print 'Done!'
 
 def main():
     description = prog + """ is a tool for synchronizing folders and encrypt
@@ -279,8 +380,17 @@ def main():
                  from local to remote, no deletes. 'echo' replicates changed
                  files and deletes to remote. (default: %(default)s)""")
 
-    parser.add_argument('action', nargs=1, choices=['backup', 'restore'],
-            help='backup data or restore data')
+    parser.add_argument('--verbose', dest='verbose', action='store_true')
+    parser.add_argument('--verify', dest='verify', action='store_true',
+            help="""verify remote files' md5 against metadata and resync if
+                 there is a mismatch""")
+
+    parser.add_argument('-p', nargs=1, metavar='passphrase', dest='passphrase',
+            required=True, help='passphrase for encryption')
+
+    parser.add_argument('action', nargs=1,
+            choices=['backup', 'restore'],
+            help='backup or restore data')
 
     remote_help = """s3 bucket (s3://bucket-name/folder) or Manta path
                   (/$MANTA_USER/stor/folder)"""
@@ -291,35 +401,36 @@ def main():
 
     args = parser.parse_args()
 
-    ret = subprocess.call("mkdir -p " + tmp_dir, shell = True)
-    if ret != 0:
-        raise RuntimeError("Couldn't create temporary directory")
-
     action = args.action[0]
     remote = args.remote[0]
-    local = args.loca[0]
+    local = args.local[0]
     service = args.service[0]
     mode = args.mode[0]
+    passphrase = args.passphrase[0]
+    verbose = args.verbose
 
-    if service == 's3':
+    try:
+        os.mkdir(tmp_dir)
+    except OSError:
+        pass
+
+    if service == 's':
         download = s3_download
         upload = s3_upload
-        encrypt = s3_encrypt
-        decrypt = s3_decrypt
+        delete = s3_delete
+        remote_md5 = s3_md5
     else:
         download = manta_download
         upload = manta_upload
-        encrypt = manta_encrypt
-        decrypt= manta_decrypt
+        delete = manta_delete
+        remote_md5 = manta_md5
 
     if action == 'backup':
-        backup(remote, local, mode, download, upload, encrypt)
-    else:
-        restore(remote, local, download, decrypt)
+        backup(remote, local, mode, verbose, passphrase, download, upload, delete, remote_md5)
+    elif action == "restore":
+        restore(remote, local, verbose, passphrase, download)
 
-    ret = subprocess.call("rm -rf " + tmp_dir, shell = True)
-    if ret != 0:
-        raise RuntimeError("Couldn't remove temporary directory")
+    shutil.rmtree(tmp_dir)
 
 if __name__ == '__main__':
     try:
@@ -330,7 +441,7 @@ if __name__ == '__main__':
         sys.exit(e.code)
 
     except KeyboardInterrupt:
-        sys.stderr.write("See ya!\n")
+        sys.stderr.write("\nSee ya!\n")
         sys.exit(1)
 
     except Exception, e:
