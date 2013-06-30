@@ -36,25 +36,30 @@ def s3_md5(remote):
     return m.group(1)
 
 def manta_download(remote, local):
+    remote = remote.replace(" ", "%20")
     proc = subprocess.Popen(['mget', '-o', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
 def manta_upload(local, remote):
     dirname = os.path.dirname(remote)
 
+    dirname = dirname.replace(" ", "%20")
     proc = subprocess.Popen(['mmkdir', '-p', dirname], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     output, errors = proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError("Failed to mmkdir -p " + dirname)
 
+    remote = remote.replace(" ", "%20")
     proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
 def manta_delete(remote):
+    remote = remote.replace(" ", "%20")
     proc = subprocess.Popen(['mrm', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.communicate()
 
 def manta_md5(remote):
+    remote = remote.replace(" ", "%20")
     proc = subprocess.Popen(['mmd5', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     output, errors = proc.communicate()
     if proc.returncode != 0:
@@ -64,23 +69,29 @@ def manta_md5(remote):
     return m.group(1)
 
 def encrypt(decrypted, encrypted, passphrase):
-    gpg_encrypt = 'gpg -c --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
-    gpg_encrypt += encrypted
-    gpg_encrypt += ' ' + decrypted
-    command = gpg_encrypt.split(" ")
+    data = {"output": encrypted, "input": decrypted}
+    gpg_encrypt = 'gpg -c --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o %(output)s %(input)s'
+    parts = gpg_encrypt.split(" ")
+    command = []
+    for part in parts:
+        command.append(part % data)
     proc = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
     output, errors = proc.communicate(passphrase + "\n")
     if proc.returncode != 0:
+        print errors
         raise RuntimeError("Failed to encrypt " + decrypted)
 
 def decrypt(encrypted, decrypted, passphrase):
-    gpg_decrypt = 'gpg -d --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o '
-    gpg_decrypt += decrypted
-    gpg_decrypt += ' ' + encrypted
-    command = gpg_decrypt.split(" ")
+    data = {"output": decrypted, "input": encrypted}
+    gpg_decrypt = 'gpg -d --cipher-algo AES256 --no-verbose --no-use-agent --batch --yes --passphrase-fd 0 -o %(output)s %(input)s'
+    parts = gpg_decrypt.split(" ")
+    command = []
+    for part in parts:
+        command.append(part % data)
     proc = subprocess.Popen(command, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
     output, errors = proc.communicate(passphrase + "\n")
     if proc.returncode != 0:
+        print errors
         raise RuntimeError("Failed to decrypt " + encrypted)
 
 # Calculates the MD5 of a file
@@ -231,7 +242,7 @@ def upload_file(bucket, directory, path, upload, passphrase):
 
     for file_entry in pending_files:
         tmp_path = file_entry['tmp_path']
-        tmp_encrypt = file_entry['tmp_path'] + '.encrypt'
+        tmp_encrypt = tmp_dir + '/' + 'tmp.encrypt'
         file_path = file_entry['path']
 
         encrypt(tmp_path, tmp_encrypt, passphrase)
@@ -243,6 +254,7 @@ def upload_file(bucket, directory, path, upload, passphrase):
 
         output, errors = upload(tmp_encrypt, remote)
         if errors != "":
+            print errors
             raise RuntimeError("Failed to upload file " + tmp_path)
 
         file_entry['encrypted_md5'] = md5(tmp_encrypt)
@@ -253,7 +265,7 @@ def upload_file(bucket, directory, path, upload, passphrase):
 
     return pending_files
 
-def backup(bucket, rel_dir, mode, verbose, passphrase, download, upload, delete, remote_md5):
+def backup(bucket, rel_dir, mode, verbose, verify, passphrase, download, upload, delete, remote_md5):
     directory = os.path.abspath(rel_dir)
     basename = os.path.basename(directory)
 
@@ -277,7 +289,7 @@ def backup(bucket, rel_dir, mode, verbose, passphrase, download, upload, delete,
             md5hash = md5(path)
             if metadata[key]["orig_md5"] != md5hash:
                 pending.append({"path": path, "orig_md5": md5hash})
-            else:
+            elif verify:
                 for part in metadata[key]['files']:
                     expected_md5 = part['encrypted_md5']
                     actual_md5 = remote_md5(bucket + '/' + part['path'])
@@ -410,6 +422,7 @@ def main():
     mode = args.mode[0]
     passphrase = args.passphrase
     verbose = args.verbose
+    verify = args.verify
 
     if passphrase == None:
         passphrase = getpass.getpass("Enter passphrase to encrypt your data with: ")
@@ -431,7 +444,7 @@ def main():
         remote_md5 = manta_md5
 
     if action == 'backup':
-        backup(remote, local, mode, verbose, passphrase, download, upload, delete, remote_md5)
+        backup(remote, local, mode, verbose, verify, passphrase, download, upload, delete, remote_md5)
     elif action == "restore":
         restore(remote, local, verbose, passphrase, download)
 
