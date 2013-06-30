@@ -1,8 +1,5 @@
 #!/usr/bin/env python
 
-# TODO: Remove
-import random
-
 import unittest
 import os
 import subprocess
@@ -31,11 +28,78 @@ class MantaTestCase(unittest.TestCase):
         if proc.returncode != 0:
             print errors
 
-    def testInitialSync(self):
+    def testSync(self):
+        self.runInitialSync()
+        self.runSubsequentChange()
+        self.runEchoMode()
+        self.runVerify()
+
+    def runInitialSync(self):
+        # Backup data/1 to Manta
+        self.runMantaCommand('backup', '', 'data/1')
+
+        # Restore data/1 from Manta to tmp/1
+        self.runMantaCommand('restore', '', 'tmp/1')
+
+        # Verify downloaded content matches what we uploaded
+        self.runCommand('diff -r data/1 tmp/1')
+
+    def runSubsequentChange(self):
+        # Backup data/2 to Manta
+        self.runMantaCommand('backup', '', 'data/2')
+
+        # Restore data/2 from Manta to tmp/2
+        self.runMantaCommand('restore', '', 'tmp/2')
+
+        # Verify downloaded content matches what we uploaded
+        self.runCommand('diff -r data/2 tmp/2')
+
+    def runEchoMode(self):
+        # Backup data/3 to Manta with Echo mode
+        self.runMantaCommand('backup', '-m echo', 'data/3')
+
+        # Restore data/3 from Manta to tmp/3
+        self.runMantaCommand('restore', '', 'tmp/3')
+
+        # Verify downloaded content matches what we uploaded
+        self.runCommand('diff -r data/3 tmp/3')
+
+    def runVerify(self):
+        # Modify content on Manta so that it doesn't match the MD5 anymore
+        self.runCommand('mget -o tmp/test ' + self.manta_path + '/test/dir_nospace/test')
+        self.runCommand('mput -f tmp/test ' + self.manta_path + '/test/file_nospace')
+
+        # Backup data/3 to Manta with --verify
+        self.runMantaCommand('backup', '-m echo --verify', 'data/3')
+
+        # Restore data/3 from Manta to tmp/4
+        self.runMantaCommand('restore', '', 'tmp/4')
+
+        # Verify downloaded content matches what we uploaded
+        self.runCommand('diff -r data/3 tmp/4')
         pass
+
+    def runMantaCommand(self, action, extras, local):
+        command = '../csync -p testing -s manta ' + extras + ' ' + action + ' ' + self.manta_path + '/test ' + local
+        self.runCommand(command)
+
+    def runCommand(self, command):
+        command = command.replace("  ", " ")
+        command = command.split(" ")
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = proc.communicate()
+
+        self.assertEqual(output, "")
+        self.assertEqual(errors, "")
+        self.assertEqual(proc.returncode, 0)
 
     def tearDown(self):
         proc = subprocess.Popen(['mrm', '-r', self.manta_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = proc.communicate()
+        if proc.returncode != 0:
+            print errors
+
+        proc = subprocess.Popen(['rm', '-rf', 'tmp'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if proc.returncode != 0:
             print errors
