@@ -254,7 +254,7 @@ def upload_file(bucket, directory, path, service, passphrase):
     pending_files = []
 
     # Split large files into smaller chunks
-    chunk_size = 5
+    chunk_size = 100
     if statinfo.st_size >= chunk_size * 1024 * 1024:
         dirname = os.path.dirname(path)
         filename = os.path.basename(path)
