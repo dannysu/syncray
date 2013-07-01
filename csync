@@ -38,25 +38,9 @@ class AmazonS3:
         return m.group(1)
 
 class JoyentManta:
-    def split_path(self, path):
-        if path.endswith(os.sep):
-            path = path[:len(path)-1]
-        parts = []
-        while True:
-            dirname, basename = os.path.split(path)
-
-            if basename != "":
-                parts.append(basename)
-                path = dirname
-            else:
-                break
-
-        parts.reverse()
-        return parts
-
     # Manta can't handle spaces in filename, so need this conversion function.
     def convert(self, path):
-        parts = self.split_path(path)
+        parts = split_path(path)
 
         fixed_parts = []
         for part in parts:
@@ -64,8 +48,7 @@ class JoyentManta:
                 m = hashlib.md5()
                 m.update(part)
                 md5hash = m.hexdigest()
-                part += md5hash
-            part = part.replace(" ", "%20")
+                part = md5hash
             fixed_parts.append(part)
 
         path = os.sep + os.sep.join(fixed_parts)
@@ -157,6 +140,38 @@ def list(directory):
             result.append(path + os.sep + filename)
     return result
 
+def split_path(path):
+    if path.endswith(os.sep):
+        path = path[:len(path)-1]
+    parts = []
+    while True:
+        dirname, basename = os.path.split(path)
+
+        if basename != "":
+            parts.append(basename)
+            path = dirname
+        else:
+            break
+
+    parts.reverse()
+    return parts
+
+def get_remote_path(local_path):
+    parts = split_path(local_path)
+    fixed_parts = []
+    for part in parts:
+        regex = re.compile("[^\x00-\x7F]+")
+        findall = regex.findall(part)
+        if len(findall) > 0:
+            m = hashlib.md5()
+            m.update(part)
+            md5hash = m.hexdigest()
+            part = md5hash
+        fixed_parts.append(part)
+
+    remote_path = os.sep.join(fixed_parts)
+    return remote_path
+
 def download_metadata(bucket, directory, service, passphrase):
     remote = bucket + '/.csync'
     tmp_encrypt = tmp_dir + os.sep + directory + '.csync.encrypt'
@@ -200,13 +215,13 @@ def upload_metadata(bucket, directory, metadata, service, passphrase):
 
     os.remove(tmp_encrypt)
 
-def download_file(bucket, directory, path, entry, service, passphrase):
+def download_file(bucket, directory, entry, service, passphrase):
     if len(entry['files']) == 1:
         file_entry = entry['files'][0]
-        remote = bucket + '/' + file_entry['path']
-        tmp_encrypt = tmp_dir + os.sep + os.path.basename(path) + '.encrypt'
-        tmp_decrypt = tmp_dir + os.sep + os.path.basename(path) + '.decrypt'
-        local = directory + os.sep + path
+        remote = bucket + '/' + file_entry['remote_path']
+        tmp_encrypt = tmp_dir + os.sep + os.path.basename(entry['local_path']) + '.encrypt'
+        tmp_decrypt = tmp_dir + os.sep + os.path.basename(entry['local_path']) + '.decrypt'
+        local = directory + os.sep + entry['local_path']
 
         output, errors = service.download(remote, tmp_encrypt)
         if errors != "":
@@ -222,12 +237,12 @@ def download_file(bucket, directory, path, entry, service, passphrase):
     cat_cmd = ['cat']
 
     entries = entry['files']
-    entries.sort(key=lambda e: e['path'])
+    entries.sort(key=lambda e: e['local_path'])
     for file_entry in entries:
-        remote = bucket + '/' + file_entry['path']
-        tmp_encrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.encrypt'
-        tmp_decrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.decrypt'
-        local = tmp_dir + os.sep + os.path.basename(file_entry['path'])
+        remote = bucket + '/' + file_entry['remote_path']
+        tmp_encrypt = tmp_dir + os.sep + os.path.basename(file_entry['local_path']) + '.encrypt'
+        tmp_decrypt = tmp_dir + os.sep + os.path.basename(file_entry['local_path']) + '.decrypt'
+        local = tmp_dir + os.sep + os.path.basename(file_entry['local_path'])
 
         output, errors = service.download(remote, tmp_encrypt)
         if errors != "":
@@ -240,11 +255,11 @@ def download_file(bucket, directory, path, entry, service, passphrase):
 
         os.remove(tmp_encrypt)
 
-    local = open(directory + os.sep + path, 'w')
+    local = open(directory + os.sep + entry['local_path'], 'w')
     proc = subprocess.Popen(cat_cmd, stdout=local, stderr=subprocess.PIPE)
     output, errors = proc.communicate()
     if errors != "":
-        raise RuntimeError("Failed to concatenate files for " + directory + os.sep + path)
+        raise RuntimeError("Failed to concatenate files for " + directory + os.sep + entry['path'])
 
     local.close()
 
@@ -263,18 +278,24 @@ def upload_file(bucket, directory, path, service, passphrase):
         if errors != "":
             raise RuntimeError("Failed to split file " + path)
 
-        for (split_path, dirs, files) in os.walk(tmp_dir):
+        for (sub_path, dirs, files) in os.walk(tmp_dir):
             for file in files:
                 if file.startswith(filename + '-'):
                     md5hash = md5(tmp_dir + os.sep + file)
+                    local_path = dirname[len(directory)+1:] + os.sep + file
+                    remote_path = get_remote_path(local_path)
                     pending_files.append({
-                        "path": dirname[len(directory)+1:] + os.sep + file,
+                        "local_path": local_path,
+                        "remote_path": remote_path,
                         "orig_md5": md5hash,
                         "tmp_path": tmp_dir + os.sep + file
                     })
     else:
+        local_path = path[len(directory)+1:]
+        remote_path = get_remote_path(local_path)
         pending_files.append({
-            "path": path[len(directory)+1:],
+            "local_path": local_path,
+            "remote_path": remote_path,
             "orig_md5": md5(path),
             "tmp_path": path
         })
@@ -282,7 +303,7 @@ def upload_file(bucket, directory, path, service, passphrase):
     for file_entry in pending_files:
         tmp_path = file_entry['tmp_path']
         tmp_encrypt = tmp_dir + os.sep + 'tmp.encrypt'
-        file_path = file_entry['path']
+        file_path = file_entry['remote_path']
 
         encrypt(tmp_path, tmp_encrypt, passphrase)
 
@@ -323,6 +344,7 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
     files = list(directory)
     for path in files:
         key = path[len(directory)+1:]
+        key = get_remote_path(key)
         if key in metadata:
             # file is in metadata, so check to see if it has changed
             md5hash = md5(path)
@@ -331,7 +353,7 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
             elif verify:
                 for part in metadata[key]['files']:
                     expected_md5 = part['encrypted_md5']
-                    actual_md5 = service.md5(bucket + '/' + part['path'])
+                    actual_md5 = service.md5(bucket + '/' + part['remote_path'])
                     if expected_md5 != actual_md5:
                         pending.append({"path": path, "orig_md5": md5hash})
                         break
@@ -355,7 +377,10 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
 
         encrypted_files = upload_file(bucket, directory, path, service, passphrase)
 
-        metadata[path[len(directory)+1:]] = {"orig_md5": orig_md5, "files": encrypted_files}
+        local_path = path[len(directory)+1:]
+        key = local_path
+        key = get_remote_path(key)
+        metadata[key] = {"local_path": local_path, "orig_md5": orig_md5, "files": encrypted_files}
         upload_metadata(bucket, basename, metadata, service, passphrase)
 
         if verbose:
@@ -365,7 +390,8 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
     if mode == 'e':
         remove = []
         for key in metadata:
-            if not os.path.exists(directory + os.sep + key):
+            entry = metadata[key]
+            if not os.path.exists(directory + os.sep + entry['local_path']):
                 remove.append(key)
 
         for key in remove:
@@ -392,22 +418,23 @@ def restore(bucket, rel_dir, verbose, passphrase, service):
         print 'Download files'
     count = 0
     total = len(metadata.keys())
-    for file in metadata:
+    for key in metadata:
         count += 1
         if verbose:
-            sys.stdout.write(str(count) + " of " + str(total))
+            sys.stdout.write(str(count) + " of " + str(total) + " ")
             sys.stdout.flush()
 
-        path = directory + os.sep + file
+        entry = metadata[key]
+        path = directory + os.sep + entry['local_path']
         if os.path.exists(path):
             md5hash = md5(path)
-            if md5hash != metadata[file]['orig_md5']:
-                download_file(bucket, directory, file, metadata[file], service, passphrase)
+            if md5hash != entry['orig_md5']:
+                download_file(bucket, directory, entry, service, passphrase)
         else:
-            download_file(bucket, directory, file, metadata[file], service, passphrase)
+            download_file(bucket, directory, entry, service, passphrase)
 
         if verbose:
-            sys.stdout.write(" " + unichr(10003) + "\n")
+            sys.stdout.write(unichr(10003) + "\n")
 
     if verbose:
         print 'Done!'
