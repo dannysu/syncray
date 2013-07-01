@@ -9,10 +9,11 @@ import hashlib
 import argparse
 import re
 import getpass
+import tempfile
 from logging import error
 
 prog = 'csync'
-tmp_dir = "/tmp/.csync"
+tmp_dir = tempfile.mkdtemp()
 
 class AmazonS3:
     def download(self, remote, local):
@@ -37,36 +38,64 @@ class AmazonS3:
         return m.group(1)
 
 class JoyentManta:
+    def split_path(self, path):
+        if path.endswith(os.sep):
+            path = path[:len(path)-1]
+        parts = []
+        while True:
+            dirname, basename = os.path.split(path)
+
+            if basename != "":
+                parts.append(basename)
+                path = dirname
+            else:
+                break
+
+        parts.reverse()
+        return parts
+
+    # Manta can't handle spaces in filename, so need this conversion function.
+    def convert(self, path):
+        parts = self.split_path(path)
+
+        fixed_parts = []
+        for part in parts:
+            if part.find(" ") > 0:
+                m = hashlib.md5()
+                m.update(part)
+                md5hash = m.hexdigest()
+                part += md5hash
+            part = part.replace(" ", "%20")
+            fixed_parts.append(part)
+
+        path = os.sep + os.sep.join(fixed_parts)
+        return path
+
     def download(self, remote, local):
-        # Manta can't handle spaces in filename
-        remote = remote.replace(" ", "%20")
+        remote = self.convert(remote)
         proc = subprocess.Popen(['mget', '-o', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc.communicate()
 
     def upload(self, local, remote):
         dirname = os.path.dirname(remote)
 
-        # Manta can't handle spaces in filename
-        dirname = dirname.replace(" ", "%20")
+        dirname = self.convert(dirname)
         proc = subprocess.Popen(['mmkdir', '-p', dirname], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError("Failed to mmkdir -p " + dirname)
 
-        # Manta can't handle spaces in filename
-        remote = remote.replace(" ", "%20")
+        remote = self.convert(remote)
         proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc.communicate()
 
     def delete(self, remote):
-        # Manta can't handle spaces in filename
-        remote = remote.replace(" ", "%20")
+        remote = self.convert(remote)
         proc = subprocess.Popen(['mrm', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc.communicate()
 
     def md5(self, remote):
-        # Manta can't handle spaces in filename
-        remote = remote.replace(" ", "%20")
+        remote = self.convert(remote)
         proc = subprocess.Popen(['mmd5', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if proc.returncode != 0:
@@ -125,14 +154,14 @@ def list(directory):
     result = []
     for (path, dirs, files) in os.walk(directory):
         for filename in files:
-            result.append(path + '/' + filename)
+            result.append(path + os.sep + filename)
     return result
 
 def download_metadata(bucket, directory, service, passphrase):
     remote = bucket + '/.csync'
-    tmp_encrypt = tmp_dir + '/' + directory + '.csync.encrypt'
-    tmp_decrypt = tmp_dir + '/' + directory + '.csync.decrypt'
-    local = tmp_dir + '/' + directory + '.csync'
+    tmp_encrypt = tmp_dir + os.sep + directory + '.csync.encrypt'
+    tmp_decrypt = tmp_dir + os.sep + directory + '.csync.decrypt'
+    local = tmp_dir + os.sep + directory + '.csync'
 
     output, errors = service.download(remote, tmp_encrypt)
 
@@ -153,8 +182,8 @@ def download_metadata(bucket, directory, service, passphrase):
 
 def upload_metadata(bucket, directory, metadata, service, passphrase):
     remote = bucket + '/.csync'
-    tmp_encrypt = tmp_dir + '/' + directory + '.csync.encrypt'
-    local = tmp_dir + '/' + directory + '.csync'
+    tmp_encrypt = tmp_dir + os.sep + directory + '.csync.encrypt'
+    local = tmp_dir + os.sep + directory + '.csync'
 
     # Save updated metadata file to disk
     output = json.dumps(metadata)
@@ -175,9 +204,9 @@ def download_file(bucket, directory, path, entry, service, passphrase):
     if len(entry['files']) == 1:
         file_entry = entry['files'][0]
         remote = bucket + '/' + file_entry['path']
-        tmp_encrypt = tmp_dir + '/' + os.path.basename(path) + '.encrypt'
-        tmp_decrypt = tmp_dir + '/' + os.path.basename(path) + '.decrypt'
-        local = directory + '/' + path
+        tmp_encrypt = tmp_dir + os.sep + os.path.basename(path) + '.encrypt'
+        tmp_decrypt = tmp_dir + os.sep + os.path.basename(path) + '.decrypt'
+        local = directory + os.sep + path
 
         output, errors = service.download(remote, tmp_encrypt)
         if errors != "":
@@ -193,9 +222,9 @@ def download_file(bucket, directory, path, entry, service, passphrase):
     cat_cmd = ['cat']
     for file_entry in entry['files']:
         remote = bucket + '/' + file_entry['path']
-        tmp_encrypt = tmp_dir + '/' + os.path.basename(file_entry['path']) + '.encrypt'
-        tmp_decrypt = tmp_dir + '/' + os.path.basename(file_entry['path']) + '.decrypt'
-        local = tmp_dir + '/' + os.path.basename(file_entry['path'])
+        tmp_encrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.encrypt'
+        tmp_decrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.decrypt'
+        local = tmp_dir + os.sep + os.path.basename(file_entry['path'])
 
         output, errors = service.download(remote, tmp_encrypt)
         if errors != "":
@@ -208,11 +237,11 @@ def download_file(bucket, directory, path, entry, service, passphrase):
 
         os.remove(tmp_encrypt)
 
-    local = open(directory + '/' + path, 'w')
+    local = open(directory + os.sep + path, 'w')
     proc = subprocess.Popen(cat_cmd, stdout=local, stderr=subprocess.PIPE)
     output, errors = proc.communicate()
     if errors != "":
-        raise RuntimeError("Failed to concatenate files for " + directory + '/' + path)
+        raise RuntimeError("Failed to concatenate files for " + directory + os.sep + path)
 
     local.close()
 
@@ -226,7 +255,7 @@ def upload_file(bucket, directory, path, service, passphrase):
     if statinfo.st_size >= chunk_size * 1024 * 1024:
         dirname = os.path.dirname(path)
         filename = os.path.basename(path)
-        proc = subprocess.Popen(['split', '-b' + chunk_size + 'm', path, tmp_dir + '/' + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['split', '-b' + chunk_size + 'm', path, tmp_dir + os.sep + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if errors != "":
             raise RuntimeError("Failed to split file " + path)
@@ -234,11 +263,11 @@ def upload_file(bucket, directory, path, service, passphrase):
         for (split_path, dirs, files) in os.walk(tmp_dir):
             for file in files:
                 if file.startswith(filename + '-'):
-                    md5hash = md5(tmp_dir + '/' + file)
+                    md5hash = md5(tmp_dir + os.sep + file)
                     pending_files.append({
-                        "path": dirname[len(directory)+1:] + '/' + file,
+                        "path": dirname[len(directory)+1:] + os.sep + file,
                         "orig_md5": md5hash,
-                        "tmp_path": tmp_dir + '/' + file
+                        "tmp_path": tmp_dir + os.sep + file
                     })
     else:
         pending_files.append({
@@ -249,15 +278,15 @@ def upload_file(bucket, directory, path, service, passphrase):
 
     for file_entry in pending_files:
         tmp_path = file_entry['tmp_path']
-        tmp_encrypt = tmp_dir + '/' + 'tmp.encrypt'
+        tmp_encrypt = tmp_dir + os.sep + 'tmp.encrypt'
         file_path = file_entry['path']
 
         encrypt(tmp_path, tmp_encrypt, passphrase)
 
-        if file_path.startswith('/'):
+        if file_path.startswith(os.sep):
             remote = bucket + file_path
         else:
-            remote = bucket + '/' + file_path
+            remote = bucket + os.sep + file_path
 
         output, errors = service.upload(tmp_encrypt, remote)
         if errors != "":
@@ -333,7 +362,7 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
     if mode == 'e':
         remove = []
         for key in metadata:
-            if not os.path.exists(directory + '/' + key):
+            if not os.path.exists(directory + os.sep + key):
                 remove.append(key)
 
         for key in remove:
@@ -366,7 +395,7 @@ def restore(bucket, rel_dir, verbose, passphrase, service):
             sys.stdout.write(str(count) + " of " + str(total))
             sys.stdout.flush()
 
-        path = directory + '/' + file
+        path = directory + os.sep + file
         if os.path.exists(path):
             md5hash = md5(path)
             if md5hash != metadata[file]['orig_md5']:
@@ -433,11 +462,6 @@ def main():
 
     if passphrase == None:
         passphrase = getpass.getpass("Enter passphrase to encrypt your data with: ")
-
-    try:
-        os.mkdir(tmp_dir)
-    except OSError:
-        pass
 
     if service == 's':
         service = AmazonS3()
