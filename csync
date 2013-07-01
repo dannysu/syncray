@@ -220,7 +220,10 @@ def download_file(bucket, directory, path, entry, service, passphrase):
         return
 
     cat_cmd = ['cat']
-    for file_entry in entry['files']:
+
+    entries = entry['files']
+    entries.sort(key=lambda e: e['path'])
+    for file_entry in entries:
         remote = bucket + '/' + file_entry['path']
         tmp_encrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.encrypt'
         tmp_decrypt = tmp_dir + os.sep + os.path.basename(file_entry['path']) + '.decrypt'
@@ -255,7 +258,7 @@ def upload_file(bucket, directory, path, service, passphrase):
     if statinfo.st_size >= chunk_size * 1024 * 1024:
         dirname = os.path.dirname(path)
         filename = os.path.basename(path)
-        proc = subprocess.Popen(['split', '-b' + chunk_size + 'm', path, tmp_dir + os.sep + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['split', '-b' + str(chunk_size) + 'm', path, tmp_dir + os.sep + filename + '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if errors != "":
             raise RuntimeError("Failed to split file " + path)
