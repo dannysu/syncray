@@ -26,6 +26,14 @@ echo does what contribute does except files removed locally will also be removed
 
 Both modes won't sync changes done remotely back down locally.
 
+Optional Verification
+---------------------
+
+You can optionally choose to verify data uploaded to cloud storage by passing
+the --verify argument. By doing so csync will request MD5 hash of the files
+residing remotely to compare. This means lots more API calls and thus costs
+money. It shouldn't be needed regularly.
+
 Example Usage
 -------------
 **Using S3**
