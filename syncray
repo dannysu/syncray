@@ -12,7 +12,7 @@ import getpass
 import tempfile
 from logging import error
 
-prog = 'csync'
+prog = 'syncray'
 tmp_dir = tempfile.mkdtemp()
 
 class AmazonS3:
@@ -173,10 +173,10 @@ def get_remote_path(local_path):
     return remote_path
 
 def download_metadata(bucket, directory, service, passphrase):
-    remote = bucket + '/.csync'
-    tmp_encrypt = tmp_dir + os.sep + directory + '.csync.encrypt'
-    tmp_decrypt = tmp_dir + os.sep + directory + '.csync.decrypt'
-    local = tmp_dir + os.sep + directory + '.csync'
+    remote = bucket + '/.syncray'
+    tmp_encrypt = tmp_dir + os.sep + directory + '.syncray.encrypt'
+    tmp_decrypt = tmp_dir + os.sep + directory + '.syncray.decrypt'
+    local = tmp_dir + os.sep + directory + '.syncray'
 
     output, errors = service.download(remote, tmp_encrypt)
 
@@ -196,9 +196,9 @@ def download_metadata(bucket, directory, service, passphrase):
     return metadata
 
 def upload_metadata(bucket, directory, metadata, service, passphrase):
-    remote = bucket + '/.csync'
-    tmp_encrypt = tmp_dir + os.sep + directory + '.csync.encrypt'
-    local = tmp_dir + os.sep + directory + '.csync'
+    remote = bucket + '/.syncray'
+    tmp_encrypt = tmp_dir + os.sep + directory + '.syncray.encrypt'
+    local = tmp_dir + os.sep + directory + '.syncray'
 
     # Save updated metadata file to disk
     output = json.dumps(metadata)

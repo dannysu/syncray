@@ -1,5 +1,5 @@
-csync (Cloud Sync) with support for Amazon S3 and Joyent Manta
-==============================================================
+syncray with support for Amazon S3 and Joyent Manta
+===================================================
 
 Synchronizes a given directory to either S3-compatible service or Joyent Manta. Useful for backup data purposes.
 
@@ -30,7 +30,7 @@ Optional Verification
 ---------------------
 
 You can optionally choose to verify data uploaded to cloud storage by passing
-the --verify argument. By doing so csync will request MD5 hash of the files
+the --verify argument. By doing so syncray will request MD5 hash of the files
 residing remotely to compare. This means lots more API calls and thus costs
 money. It shouldn't be needed regularly.
 
@@ -38,14 +38,14 @@ Example Usage
 -------------
 **Using S3**
 
-[~] csync backup s3://bucket-name/dir1/dir2 ~/dir
+[~] syncray backup s3://bucket-name/dir1/dir2 ~/dir
 
-[~] csync restore s3://bucket-name/dir1/dir2 ~/dir
+[~] syncray restore s3://bucket-name/dir1/dir2 ~/dir
 
 **Using Manta**
 
-[~] csync -s manta backup /$MANTA_USER/stor/dir1/dir2 ~/dir
+[~] syncray -s manta backup /$MANTA_USER/stor/dir1/dir2 ~/dir
 
-[~] csync -s manta restore /$MANTA_USER/stor/dir1/dir2 ~/dir
+[~] syncray -s manta restore /$MANTA_USER/stor/dir1/dir2 ~/dir
 
-For more details, run `csync -h`
+For more details, run `syncray -h`
