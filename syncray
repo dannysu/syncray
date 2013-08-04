@@ -383,10 +383,10 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
             pending.append({"path": path, "orig_md5": md5(path)})
 
     # Go through each pending file, encrypt and upload them to S3, then update metadata
-    if verbose:
-        print 'Upload changes'
     count = 0
     total = len(pending)
+    if verbose:
+        print 'Upload changes (' + str(total) + ')'
     for change in pending:
         count += 1
         if verbose:
@@ -409,15 +409,30 @@ def backup(bucket, rel_dir, mode, verbose, verify, passphrase, service):
 
     # If we're in Echo mode, then also delete on remote anything already gone on local
     if mode == 'e':
+        if verbose:
+            print "Perform 'Echo' mode"
         remove = []
         for key in metadata:
             entry = metadata[key]
             if not os.path.exists(directory + os.sep + entry['local_path']):
                 remove.append(key)
 
+        count = 0
+        total = len(remove)
+        if verbose:
+            print "Removing " + str(total)
         for key in remove:
+            count += 1
+            if verbose:
+                sys.stdout.write(str(count) + " of " + str(total))
+                sys.stdout.flush()
             service.delete(bucket + '/' + key)
             metadata.pop(key)
+            if count % 1000 == 0:
+                upload_metadata(bucket, basename, metadata, service, passphrase)
+            if verbose:
+                sys.stdout.write(" " + unichr(10003) + "\n")
+        if total > 0:
             upload_metadata(bucket, basename, metadata, service, passphrase)
 
     if verbose:
