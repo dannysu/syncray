@@ -10,6 +10,7 @@ import argparse
 import re
 import getpass
 import tempfile
+import time
 from logging import error
 
 prog = 'syncray'
@@ -54,28 +55,48 @@ class JoyentManta:
         path = os.sep + os.sep.join(fixed_parts)
         return path
 
-    def download(self, remote, local):
+    def download(self, remote, local, retries=0):
         remote = self.convert(remote)
         proc = subprocess.Popen(['mget', '-o', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return proc.communicate()
+        output, errors = proc.communicate()
+        if proc.returncode != 0:
+            if retries < 2:
+                time.sleep(.5)
+                return self.download(remote, local, retries + 1)
+            else:
+                return output, errors
+        else:
+            return output, errors
 
-    def upload(self, local, remote):
+    def upload(self, local, remote, retries=0):
         dirname = os.path.dirname(remote)
 
         dirname = self.convert(dirname)
         proc = subprocess.Popen(['mmkdir', '-p', dirname], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if proc.returncode != 0:
-            raise RuntimeError("Failed to mmkdir -p " + dirname)
+            if retries < 2:
+                time.sleep(.5)
+                return self.upload(local, remote, retries + 1)
+            else:
+                raise RuntimeError("Failed to mmkdir -p " + dirname)
 
         remote = self.convert(remote)
         proc = subprocess.Popen(['mput', '-c', '1', '-f', local, remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return proc.communicate()
 
-    def delete(self, remote):
+    def delete(self, remote, retries=0):
         remote = self.convert(remote)
         proc = subprocess.Popen(['mrm', remote], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return proc.communicate()
+        output, errors = proc.communicate()
+        if proc.returncode != 0:
+            if retries < 2:
+                time.sleep(.5)
+                return self.delete(remote, retries + 1)
+            else:
+                return output, errors
+        else:
+            return output, errors
 
     def md5(self, remote):
         remote = self.convert(remote)

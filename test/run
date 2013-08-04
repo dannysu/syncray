@@ -13,6 +13,11 @@ class S3TestCase(unittest.TestCase):
         if proc.returncode != 0:
             print errors
 
+        proc = subprocess.Popen(['mkdir', 'tmp'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = proc.communicate()
+        if proc.returncode != 0:
+            print errors
+
     def testSync(self):
         self.runInitialSync()
         self.runSubsequentChange()
@@ -101,6 +106,11 @@ class MantaTestCase(unittest.TestCase):
         self.manta_user = os.environ['MANTA_USER']
         self.manta_path = '/' + self.manta_user + '/stor/syncray_test'
         proc = subprocess.Popen(['mmkdir', self.manta_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors = proc.communicate()
+        if proc.returncode != 0:
+            print errors
+
+        proc = subprocess.Popen(['mkdir', 'tmp'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output, errors = proc.communicate()
         if proc.returncode != 0:
             print errors
